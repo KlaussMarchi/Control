@@ -1,0 +1,1135 @@
+// aquisicao
+
+#include <Servo.h>
+#define MIN_OUT 45
+#define MAX_OUT 135
+
+class KlaussServo {
+private:
+    Servo servo;
+    unsigned long lastMoveTime = 0;
+
+public:
+    int pin;
+    int currentAngle = 90;
+    int targetAngle  = 90;
+    int MIN_ANGLE, MAX_ANGLE;
+
+    KlaussServo(int pin, int min, int max): 
+        pin(pin), 
+        MIN_ANGLE(min), 
+        MAX_ANGLE(max){}
+
+    void setup(){
+        servo.attach(pin);
+        servo.write(currentAngle);
+    }
+
+    void setAngle(int angle){
+        targetAngle = constrain(angle, MIN_ANGLE, MAX_ANGLE);
+    }
+
+    void update(){
+        int passo = 5; // velocity
+
+        if (abs(targetAngle - currentAngle) < passo)
+            currentAngle = targetAngle;
+        else
+            currentAngle += (targetAngle > currentAngle) ? passo : -passo;
+
+        servo.write(currentAngle);
+    }
+
+    void reset(){
+        setAngle(90);
+    }
+};
+
+class UltrasonicSensor{
+private:
+    int trigPin, echoPin;
+
+public:
+    float distance = 0;
+
+    UltrasonicSensor(int trigPin, int echoPin): 
+        trigPin(trigPin), 
+        echoPin(echoPin) {}
+
+    void setup(){
+        pinMode(trigPin, OUTPUT);
+        pinMode(echoPin, INPUT);
+    }
+
+    void update(){
+        digitalWrite(trigPin, LOW);
+        delayMicroseconds(2);
+        digitalWrite(trigPin, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(trigPin, LOW);
+
+        long duration = pulseIn(echoPin, HIGH, 12000); 
+        distance = (duration > 0) ? (duration / 2.0) * 0.000343 : 4.0;  
+    }
+};
+
+class SignalGenerator{
+private:
+    int min, max;
+    unsigned long lastChange = 0;
+    bool firstRun = true;
+
+public:
+    const unsigned long period = 3000;
+    float output;
+
+    SignalGenerator(int min, int max) {
+        this->min = min;
+        this->max = max;
+        this->output = min;
+    }
+
+    void update() {
+        unsigned long now = millis();
+        
+        if(now - lastChange >= period || firstRun) {
+            lastChange = now;
+            firstRun = false;
+            output = random(min, max+1);
+            period = random(500, 5000);
+        }
+    }
+};
+
+SignalGenerator generator(MIN_OUT, MAX_OUT);
+KlaussServo myServo(11, MIN_OUT, MAX_OUT);
+UltrasonicSensor ultrasonic(8, 9);
+unsigned long startTime;
+
+void setup() {
+    Serial.begin(9600);
+    
+    myServo.setup();
+    ultrasonic.setup();
+
+    while(!Serial.available())
+        continue;
+    
+    randomSeed(analogRead(0));
+    startTime = millis();
+}
+
+void loop() {
+    ultrasonic.update();
+    generator.update();
+    
+    myServo.setAngle(generator.output);
+    myServo.update();
+
+    Serial.print("{\"time\":");
+    Serial.print((millis() - startTime) / 1000.0, 3);
+    Serial.print(",\"servo\":");
+    Serial.print(myServo.currentAngle);
+    Serial.print(",\"distance\":");
+    Serial.print(ultrasonic.distance, 3);
+    Serial.println("}");
+}
+
+
+// analise
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import json, os
+import joblib
+from itertools import product
+from scipy.signal import butter, filtfilt
+
+import matplotlib.ticker as mticker
+import pandas as pd
+import control as ctl
+df   = pd.read_csv('../Dataset/data.csv')
+X_MIN, X_MAX = (0.7, 0.8)
+INPUT  = 'servo'
+SENSOR = 'distance'
+df = df.rename(columns={INPUT: 'input', SENSOR: 'sensor'})
+
+df.loc[df['sensor'] >= 4, 'sensor'] = np.nan # opcional - tira valores discrepantes
+df['sensor'] = df['sensor'].ffill()          # opcional - tira valores discrepantes
+df
+ACTUATOR_RANGE = (45, 135)
+SENSOR_RANGE   = (0, 0.3)
+
+print('SENSOR RANGE:  ', SENSOR_RANGE)
+print('actuator range:', ACTUATOR_RANGE)
+plt.figure(figsize=(17, 5))
+plt.subplot(1, 2, 1)
+plt.plot(df.time, df.input)
+plt.grid()
+plt.xlabel('time'); plt.ylabel(INPUT)
+
+plt.subplot(1, 2, 2)
+plt.plot(df.time, df.sensor)
+plt.grid()
+plt.xlabel('time'); plt.ylabel(SENSOR)
+target = df.loc[(df.time > df.time.max()*X_MIN) & (df.time < df.time.max()*X_MAX)]
+
+plt.figure(figsize=(17, 5))
+plt.subplot(1, 2, 1)
+plt.plot(target.time, target.input)
+plt.grid()
+plt.xlabel('time'); plt.ylabel(INPUT)
+
+plt.subplot(1, 2, 2)
+plt.plot(target.time, target.sensor)
+plt.grid()
+plt.xlabel('time'); plt.ylabel(SENSOR)
+def gaussian(data):
+    data  = np.array(data)
+    n     = data.shape[0]
+    mu    = data.mean()
+    sigma = data.std()
+
+    x  = np.linspace(mu - 4*sigma, mu + 4*sigma, 400)
+    y  = (1/(sigma*np.sqrt(2*np.pi))) * np.exp(-0.5*((x - mu)/sigma)**2)
+    plt.title(f'Distribuição Gaussiana')
+    plt.hist(data, density=True, alpha=0.75)
+    plt.plot(x, y)
+    
+    text = f'média:     {mu:.3f}±{sigma:.3f} \nmediana: {np.median(data):.3f}'
+    opts = dict(boxstyle='round', facecolor='white', alpha=0.8)
+    plt.text(0.05, 0.95, text, transform=plt.gca().transAxes, verticalalignment='top', bbox=opts)
+    plt.xlabel('x'); plt.ylabel('frequência'); plt.grid()
+
+
+time = df.time.diff()[1:].to_numpy()
+dt   = np.median(time).round(3)
+print(dt)
+gaussian(time)
+def normalizePeriod(df, key, dt=0.15):
+    df = df.copy().sort_values(key)
+    df[key] = df[key] - df[key].iloc[0]
+
+    initTime  = df[key].iloc[0]
+    finalTime = df[key].iloc[-1] + dt
+    n = int(np.floor((finalTime - initTime) / dt)) + 1
+    newAxis = np.round(np.linspace(initTime, initTime + dt*(n-1), n), 10)
+
+    target = pd.DataFrame({key: newAxis})
+    out = pd.merge_asof(target, df, on=key, direction='backward')
+    return out
+
+
+df = normalizePeriod(df, 'time', dt)
+df
+target = df.loc[(df.time > df.time.max()*X_MIN) & (df.time < df.time.max()*X_MAX)]
+
+plt.figure(figsize=(17, 5))
+plt.subplot(1, 2, 1)
+plt.plot(target.time, target.input)
+plt.grid()
+plt.xlabel('time'); plt.ylabel(INPUT)
+
+plt.subplot(1, 2, 2)
+plt.plot(target.time, target.sensor)
+plt.grid()
+plt.xlabel('time'); plt.ylabel(SENSOR)
+class FrequencyAnalyzer:
+    def __init__(self, xData, yData):
+        self.xData = np.asarray(xData)
+        self.yData = np.asarray(yData)
+        
+        self.dt = np.mean(np.diff(self.xData))
+        self.nSamples = len(self.yData)
+        
+        self.yFreq = None
+        self.yMag  = None
+
+    def update(self):
+        fftResult  = np.fft.fft(self.yData)
+        freqs      = np.fft.fftfreq(self.nSamples, self.dt)
+        self.yFreq = np.fft.fftshift(freqs)
+        self.yMag  = np.fft.fftshift(np.abs(fftResult)) / self.nSamples
+
+    def plot(self, xLim=None, yLim=None, Fc=None):
+        self.update()
+
+        plt.plot(self.yFreq, self.yMag, label='blue', color='red', alpha=0.5)
+
+        if Fc is not None:
+            yMagRestricted = self.yMag.copy()
+            allowed = (np.abs(self.yFreq) <= Fc)
+            yMagRestricted[~allowed] = 0
+            plt.plot(self.yFreq, yMagRestricted, label=f'Fc={Fc}', color='blue')
+        
+        plt.xlabel('frequency')
+        plt.ylabel('amplitude')
+        plt.grid(alpha=0.3)
+        
+        if xLim: plt.xlim(xLim)
+        if yLim: plt.ylim(yLim)
+        plt.legend()
+
+
+class LowPassFilter:
+    def __init__(self, Fc, dt):
+        self.dt = dt
+        self.Fc = Fc
+        
+        Wc = (2 * np.pi * Fc) 
+        s  = ctl.TransferFunction.s
+        
+        H   = Wc / (s + Wc)
+        H_z = ctl.c2d(H, dt, method='tustin')
+        
+        self.num, self.den = self.getFraction(H_z)
+        self.Xn = np.zeros(len(self.num))
+        self.Yn = np.zeros(len(self.den))
+
+    def getFraction(self, G_z):
+        num, den = ctl.tfdata(G_z)
+        num = np.squeeze(num)
+        den = np.squeeze(den)
+
+        num = num / den[0]
+        den = den / den[0]
+        return num.tolist(), den.tolist()
+
+    def compute(self):
+        out = 0.0
+        for i in range(len(self.num)):
+            out += self.Xn[i] * self.num[i]
+        
+        for i in range(1, len(self.den)):
+            out -= self.Yn[i] * self.den[i]
+
+        return out
+
+    def update(self, inputValue):
+        for n in range(len(self.num)-1, 0, -1):
+            self.Xn[n] = self.Xn[n-1]
+
+        for n in range(len(self.den)-1, 0, -1):
+            self.Yn[n] = self.Yn[n-1]
+        
+        self.Xn[0] = inputValue
+        self.Yn[0] = self.compute()
+        return self.Yn[0] if self.Fc > 0 else inputValue
+
+    def apply(self, yData):
+        self.Xn = np.zeros(len(self.num))
+        self.Yn = np.zeros(len(self.den))
+        return np.array([self.update(val) for val in yData])
+Fc = 1.5
+xLim = (-3, 3)
+yLim = (0, 0.008)
+
+plt.figure(figsize=(17, 5))
+plt.subplot(1, 2, 1)
+FrequencyAnalyzer(df.time, df.sensor).plot(xLim, yLim, Fc=Fc)
+
+plt.subplot(1, 2, 2)
+target = df.loc[(df.time > df.time.max()*X_MIN) & (df.time < df.time.max()*X_MAX)]
+ft     = LowPassFilter(Fc=Fc, dt=dt)
+plt.plot(target.time, target.sensor, label='values')
+plt.plot(target.time, ft.apply(target.sensor), label=f'Fc={Fc}', linewidth=2)
+plt.grid(alpha=0.3); plt.legend()
+plt.xlabel('time'); plt.ylabel('values')
+plt.show()
+df['sensor'] = ft.apply(df.sensor)
+print(ft.num)
+print(ft.den)
+def getOffset(df, input_col=INPUT, output_col=SENSOR, max_lag=30):
+    u_diff = df[input_col].diff().fillna(0)
+    y_diff = df[output_col].diff().fillna(0)
+
+    lags = np.arange(0, max_lag)
+    correlations = []
+
+    for lag in lags:
+        corr = u_diff.corr(y_diff.shift(-lag))
+        correlations.append(corr if not np.isnan(corr) else 0)
+
+    best_lag = lags[np.argmax(np.abs(correlations))]
+    plt.figure(figsize=(10, 4))
+    plt.plot(lags, correlations, marker='o')
+    plt.axvline(best_lag, color='red', linestyle='--', label=f'Best OFFSET: {best_lag}')
+    plt.title('Correlação Cruzada entre $Delta$ INPUT e $Delta$ Distância')
+    plt.xlabel('Lag (Passos / OFFSET)')
+    plt.ylabel('Correlação')
+    plt.grid()
+    plt.legend()
+    plt.show()
+    return int(best_lag)
+
+
+max_time = 10
+max_lag  = int(max_time/dt)
+OFFSET   = getOffset(df, 'input', 'sensor', max_lag) 
+def getSettlingTime(df, input_col, output_col, dt, max_time=15, criterion=0.02):
+    max_lag = int(max_time / dt)
+    u_diff = df[input_col].diff().fillna(0)
+    y_diff = df[output_col].diff().fillna(0)
+
+    lags = np.arange(0, max_lag)
+    corr = np.array([c if not np.isnan(c := u_diff.corr(y_diff.shift(-lag))) else 0 for lag in lags])
+
+    envelope  = np.abs(corr)
+    peak_val  = envelope.max()
+    threshold = (peak_val * criterion)
+
+    window = 5
+    for i in range(np.argmax(envelope), len(envelope) - window):
+        if all(envelope[i:i + window] < threshold):
+            ts = round(i * dt, 3)
+
+            plt.figure(figsize=(10, 4))
+            plt.plot(lags * dt, envelope, label='correlation')
+            plt.axhline(threshold, color='gray', linestyle=':', label=f'criterion {criterion*100:.0f}%')
+            
+            plt.axvline(ts, color='red', linestyle='--', label=f'ts ≈ {ts}s')
+            plt.axvline(1.2*ts, color='red', linestyle='--', label=f'ts ≈ {ts*1.2}s')
+            plt.xlabel('time'); plt.ylabel('correlation')
+            plt.title('Estimativa do Settling Time')
+            plt.grid(); plt.legend(); plt.show()
+            return ts*1.2
+    
+    return round(max_lag * dt, 3)
+
+ts = getSettlingTime(df, 'input', 'sensor', dt, max_time=10, criterion=0.02)
+ts
+actuator_std = df['input'].diff().std()
+max_action   = df['input'].diff().abs().max()
+
+print('actuator std: ', actuator_std)
+print('max action:   ', max_action)
+info = {
+    'dt': dt,
+    'offset': OFFSET, 
+    'view_range': [X_MIN, X_MAX],
+    'sensor_range': list(SENSOR_RANGE),
+    'actuator_range': list(ACTUATOR_RANGE),
+    'sensor_filter': {'num': ft.num, 'den': ft.den},
+    'actuator_std': actuator_std,
+    'max_action': max_action,
+    'ts': ts
+}
+
+with open('info.json', 'w', encoding='utf-8') as file:
+    json.dump(info, file, ensure_ascii=False, indent=4)
+df.to_csv('../Dataset/data_cleaned.csv', index=None)
+
+
+// sistema identification
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import json, os
+import joblib
+from itertools import product
+from scipy.signal import butter, filtfilt
+
+import matplotlib.ticker as mticker
+import pandas as pd
+import control as ctl
+OPTIONS = json.loads(open('info.json', 'r').read())
+OPTIONS
+df   = pd.read_csv('../Dataset/data_cleaned.csv')
+K_CV = 5
+TEMPORAL = True
+
+X_MIN, X_MAX = OPTIONS.get('view_range')
+dt = OPTIONS.get('dt')
+ts = OPTIONS.get('ts')
+OFFSET = OPTIONS.get('offset')
+df
+plt.figure(figsize=(17, 5))
+plt.subplot(1, 2, 1)
+plt.plot(df.time, df.input)
+plt.grid()
+plt.xlabel('time'); plt.ylabel('input')
+
+plt.subplot(1, 2, 2)
+plt.plot(df.time, df.sensor)
+plt.grid()
+plt.xlabel('time'); plt.ylabel('sensor')
+def getStates(df, key, var='y', n=10, last=True):
+    table = df.copy() 
+    table[f'{var}'] = table[key]
+
+    for i in range(1, n):
+        table[f'{var}(n-{i})'] = table[key].shift(i)
+
+    table.fillna(0, inplace=True)
+    columns = [f'{var}'] + [f'{var}(n-{i})' for i in range(1, n)]
+
+    if not last:
+        columns = columns[1:]
+
+    return table[columns]
+
+
+N_STATES = OFFSET + 5
+xData    = pd.concat([
+    getStates(df, 'input',  var='u', n=N_STATES, last=True), 
+    getStates(df, 'sensor', var='x', n=N_STATES, last=False)
+], axis=1)
+
+xData = xData.iloc[N_STATES:].reset_index(drop=True)
+yData = df.sensor.values[N_STATES:]
+xData
+from Selector.index import ModelSelector
+selector = ModelSelector('linear_regression')
+model, params = selector.get()
+model
+from GridSearch.index import GridSearch
+grid = GridSearch(model, params, xData, yData, K_CV, temporal=TEMPORAL)
+grid.update()
+
+model, r2_adj = grid.evaluate()
+print('best_R2_Adjusted:', r2_adj)
+model
+from Metrics.CrossValidation.index import CrossValidation
+from Metrics.GaussianAnalyser.index import GaussianAnalyser
+cross = CrossValidation(model, xData, yData, K_CV, temporal=TEMPORAL)
+cross.update()
+
+if not TEMPORAL:
+    analyser = GaussianAnalyser(cross)
+    analyser.update()
+    analyser.plot()
+    analyser.info()
+from Metrics.Plotter.index import Plotter
+cross.print()
+cross.plot()
+info = {'r2': cross.r2, 'r2_adj': cross.adj_r2}
+Plotter(info)
+plt.figure(figsize=(15, 6))
+plt.plot(yData, label='target')
+plt.plot(model.predict(xData), label='prediction', linewidth=2)
+plt.grid(); plt.legend()
+plt.show()
+model.fit(xData, yData)
+model.get_params()
+model
+results = {
+    'model': selector.chosen,
+    'params': {key: str(value) for key, value in model.get_params().items()},
+    'K_CV': K_CV,
+    'info': analyser.info() if not TEMPORAL else cross.info(),
+    'variables': xData.columns.tolist()
+}
+
+display(pd.DataFrame([results.get('info')]))
+results
+os.makedirs('Saved/System', exist_ok=True)
+output = f'Saved/System/'
+os.makedirs(output, exist_ok=True)
+
+pd.Series(results).to_json(os.path.join(output, 'info.json'), indent=4)
+joblib.dump(model, os.path.join(output, 'model.pkl'))
+
+
+// controller neural network
+import pandas as pd
+import numpy as np
+import json, os, math
+import joblib
+from tqdm import tqdm
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from NeuralSelector.index import NeuralSelector
+OPTIONS = json.loads(open('info.json', 'r').read())
+dt      = OPTIONS.get('dt')
+
+x_min, x_max = OPTIONS.get('sensor_range')
+u_min, u_max = OPTIONS.get('actuator_range')
+OFFSET = OPTIONS.get('offset')
+ts     = OPTIONS.get('ts')
+u_std  = OPTIONS.get('actuator_std')
+max_action = OPTIONS.get('max_action')
+- Loading System Simulator
+system_info  = json.loads(open('Saved/System/info.json', 'r').read())
+system_vars  = system_info['variables']
+n_states_sys = sum(['x(n-' in var for var in system_vars]) + 1
+n_states_ctl = sum(['u(n-' in var for var in system_vars]) + 1
+
+print(system_info)
+print(system_vars)
+print(n_states_sys, 'system past states')
+print(n_states_ctl, 'actuator past states')
+
+system = joblib.load('Saved/System/model.pkl')
+system
+## SIMULADOR EM MALHA FECHADA
+`StatesUpdater` armazena valores defasados $y(k-1), u(k-1)$ necessários para lidar com inércia e atrasos de transporte.
+class StatesUpdater:
+    def __init__(self, size, initial=0.00):
+        self.initial = initial
+        self.size = size
+        self.buffer = np.array([initial for _ in range(size)])
+        
+    def update(self, value):
+        for i in range(self.size-1, 0, -1):
+            self.buffer[i] = self.buffer[i-1]
+        self.buffer[0] = value
+        return self.buffer
+    
+    def get(self, var='x'):
+        data = {var: self.buffer[0]}
+        for i in range(1, self.size):
+            data[f'{var}(n-{i})'] = self.buffer[i]
+        return {key: float(val) for key, val in data.items()}
+
+
+states = StatesUpdater(5)
+for i in range(5): print(states.update(i))
+**Simulador de Malha Fechada:** Simula o sistema de malha fechada. Retorna o estado atual, a recompensa (baseada em precisão e suavidade) 
+    e se o episódio foi finalizado (se a bola caiu da barra).
+
+Exemplo: Se a sua barra tem 0.3m, o erro máximo é 0.3m. $1 / (0.3^2) = 11.1$.Se o motor pode variar no máximo 2 graus por passo de controle. $1 / (2^2) = 0.25$. Chute inicial ótimo: errorWeight = 11.1 e effortWeight = 0.25.
+class FeedbackSimulator:
+    def __init__(self, system_model, system_vars, n_states_sys=5, n_states_ctl=5, w_err=50.0, w_eff=0.1, max_steps=200):
+        self.system_model = system_model
+        self.system_vars  = system_vars
+        
+        self.n_states_sys = n_states_sys
+        self.n_states_ctl = n_states_ctl
+        
+        self.w_err = w_err
+        self.w_eff = w_eff
+        self.max_steps = max_steps
+        
+        # 1. Definindo o valor inicial dinamicamente no centro das faixas
+        sensor_initial   = (x_max + x_min) / 2.0
+        actuator_initial = (u_max + u_min) / 2.0
+        
+        self.sensor   = StatesUpdater(self.n_states_sys, initial=sensor_initial)
+        self.actuator = StatesUpdater(self.n_states_ctl, initial=actuator_initial)
+        
+        # 2. Setpoint inicial aleatório dentro da capacidade do sensor
+        self.setpoint = np.random.uniform(x_min, x_max)
+        self.current_step = 0
+
+    def reset(self):
+        self.current_step = 0
+        sensor_initial    = (x_max + x_min) / 2.0
+        actuator_initial  = (u_max + u_min) / 2.0
+    
+        self.sensor   = StatesUpdater(self.n_states_sys, initial=sensor_initial)
+        self.actuator = StatesUpdater(self.n_states_ctl, initial=actuator_initial)
+        
+        self.setpoint = np.random.uniform(x_min, x_max) # Novo alvo aleatório possível de ser atingido
+        return self.getStates()
+    
+    def getStates(self):
+        sensor_center    = (x_max + x_min) / 2.0
+        sensor_amplitude = (x_max - x_min) / 2.0
+        
+        actuator_center    = (u_max + u_min) / 2.0
+        actuator_amplitude = (u_max - u_min) / 2.0
+        
+        error = self.setpoint - self.sensor.buffer[0]
+        normalized_error = error / sensor_amplitude
+        state = [normalized_error]
+        
+        for i in range(self.n_states_sys): # Histórico do sensor
+            normalized_x = (self.sensor.buffer[i] - sensor_center) / sensor_amplitude
+            state.append(normalized_x)
+            
+        for i in range(self.n_states_ctl): # Histórico do atuador
+            normalized_u = (self.actuator.buffer[i] - actuator_center) / actuator_amplitude
+            state.append(normalized_u)
+            
+        return np.array(state, dtype=np.float32)
+    
+    def step(self, action):
+        delta_u = action[0]
+        new_u   = self.actuator.buffer[0] + delta_u
+        
+        if new_u < u_min: 
+            new_u = u_min
+        
+        if new_u > u_max: 
+            new_u = u_max
+
+        self.actuator.update(new_u)
+        data = self.actuator.get('u')
+        
+        for i in range(1, self.n_states_sys):
+            data[f'x(n-{i})'] = self.sensor.buffer[i-1]
+        
+        model_input = pd.DataFrame([data], columns=self.system_vars)
+        next_x      = self.system_model.predict(model_input)[0]
+        
+        self.sensor.update(next_x)
+        self.current_step += 1
+    
+        error  = (self.setpoint - next_x)
+        reward = -1 * (self.w_err * (error**2) + self.w_eff * np.abs(delta_u))
+
+        states = self.getStates()
+        done   = False
+        
+        if next_x < x_min or next_x > x_max: # Punição = pior erro possível ao quadrado vezes o total de passos restantes
+            reward -= (self.w_err * 2) * (self.max_steps - self.current_step)
+            done = True
+        
+        if self.current_step >= self.max_steps:
+            done = True
+            
+        return states, reward, done
+
+
+feedback_options = {
+    'system_model': system,
+    'system_vars':  system_vars,
+    'n_states_sys': n_states_sys,
+    'n_states_ctl': n_states_ctl,
+    'w_err': 1/(x_max**2),
+    'w_eff': 1/(max_action**2),
+    'max_steps': int(1.2*ts/dt)
+}
+
+feedback = FeedbackSimulator(**feedback_options)
+state = feedback.reset()
+print(feedback_options)
+state
+- tenta depois change every x seconds
+## AGENTE DRL
+Essas classes encapsulam a essência algorítmica do DDPG (Off-Policy). Elas agem baseadas nos tensores injetados pelo `NeuralSelector` e mantêm o buffer de replay das experiências passadas, vital para descorrelacionar os dados de treinamento.
+class SystemAgent:
+    def __init__(self, actor, evaluator, state_dim, action_dim, max_action, 
+                 actor_kwargs={}, critic_kwargs={}, actor_lr=1e-4, critic_lr=1e-3, memory_size=1e5):
+        
+        # --- Redes Neurais e Otimizadores ---
+        self.actor = actor(state_dim, action_dim, max_action, **actor_kwargs)
+        self.actor_target = actor(state_dim, action_dim, max_action, **actor_kwargs)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=actor_lr)
+
+        self.critic = evaluator(state_dim, action_dim, **critic_kwargs)
+        self.critic_target = evaluator(state_dim, action_dim, **critic_kwargs)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_opt = optim.Adam(self.critic.parameters(), lr=critic_lr)
+
+        self.max_action, self.discount, self.tau = max_action, 0.99, 0.005
+        self.storage, self.max_mem, self.ptr     = [], int(memory_size), 0
+
+    def store(self, *transition):
+        """Empacota state, action, next_state, reward, done dinamicamente."""
+        if len(self.storage) < self.max_mem:
+            self.storage.append(transition)
+        else:
+            self.storage[self.ptr] = transition
+        self.ptr = (self.ptr + 1) % self.max_mem
+
+    def _sample_memory(self, batch_size):
+        """Usa zip(*...) para desempacotar a matriz inteira em 1 linha."""
+        idx = np.random.randint(0, len(self.storage), size=batch_size)
+        batch = [self.storage[i] for i in idx]
+        
+        # Transpõe as colunas e converte tudo direto para Tensor
+        s, a, s_, r, d = map(lambda x: torch.FloatTensor(np.array(x)), zip(*batch))
+        return s, a, s_, r.unsqueeze(1), d.unsqueeze(1)
+
+    def select_action(self, state):
+        with torch.no_grad():
+            return self.actor(torch.FloatTensor(state).reshape(1, -1)).cpu().numpy().flatten()
+
+    def train(self, batch_size=64):
+        s, a, s_, r, d = self._sample_memory(batch_size)
+
+        # --- Treino do Critic ---
+        target_q = r + (1 - d) * self.discount * self.critic_target(s_, self.actor_target(s_))
+        critic_loss = F.mse_loss(self.critic(s, a), target_q.detach())
+        
+        self.critic_opt.zero_grad()
+        critic_loss.backward()
+        self.critic_opt.step()
+
+        # --- Treino do Actor ---
+        actor_loss = -self.critic(s, self.actor(s)).mean()
+        
+        self.actor_opt.zero_grad()
+        actor_loss.backward()
+        self.actor_opt.step()
+
+        # --- Soft Update Agrupado ---
+        for net, target_net in [(self.critic, self.critic_target), (self.actor, self.actor_target)]:
+            for p, tp in zip(net.parameters(), target_net.parameters()):
+                tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
+## TREINAMENTO
+A classe trainer orquestra a interação entre o Agente e o Simulador da Planta. Executa os episódios e preenche a Memória de Experiência do Agente, exportando os resultados.
+class Trainer:
+    def __init__(self, agent, env, batch_size=64, epochs=100):
+        self.agent = agent
+        self.feedback   = env
+        self.max_action = agent.max_action
+        self.noise_std  = u_std * 0.01
+        self.batch_size = batch_size
+        self.action_dim = 1
+        self.epochs = epochs
+
+    def start(self):
+        for ep in tqdm(range(self.epochs)):
+            state = self.feedback.reset()
+            
+            for t in range(self.feedback.max_steps): 
+                noise  = np.random.normal(0, self.max_action * self.noise_std, size=self.action_dim) 
+                action = (self.agent.select_action(state) + noise).clip(-self.max_action, self.max_action)
+                
+                next_state, reward, done = self.feedback.step(action)
+                self.agent.store(state, action, next_state, reward, done)
+                state = next_state
+                
+                if len(self.agent.storage) > self.batch_size:
+                    self.agent.train(self.batch_size)
+                    
+                if done:
+                    break
+selector = NeuralSelector('lstm')
+Actor, Evaluator, grid_params = selector.get()
+
+batch_size = grid_params['batchSize'][0] 
+print(f"Batch Size: {batch_size}")
+
+networkKwargs = {key: values[0] for key, values in grid_params.items() if key not in ['actorLr', 'criticLr', 'batchSize']}
+
+agent_options = {
+    'actor':  Actor, 
+    'evaluator': Evaluator, 
+    'state_dim':  len(feedback.getStates()), 
+    'action_dim': 1, 
+    'max_action': max_action,
+    'actor_kwargs':  networkKwargs,
+    'critic_kwargs': networkKwargs,
+    'actor_lr' : grid_params['actorLr'][0],
+    'critic_lr': grid_params['criticLr'][0]
+}
+
+agent   = SystemAgent(**agent_options)
+trainer = Trainer(agent, feedback, batch_size=batch_size, epochs=100) 
+trainer.start()
+os.makedirs('Saved/Controller/', exist_ok=True)
+torch.save(agent.actor.state_dict(), 'Saved/Controller/actor.pth')
+
+info = {
+    'architecture': selector.chosen,
+    'actor_kwargs': networkKwargs,
+    'max_action': agent.max_action,
+    'feedback_options': str(feedback_options),
+    'agent_settings': str(agent_options)
+}
+
+with open('Saved/Controller/info.json', 'w') as f:
+    json.dump(info, f, indent=2)
+
+print("Weights and topology metadata saved!")
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import json, os, math
+import joblib
+from tqdm import tqdm
+import torch
+from NeuralSelector.index import NeuralSelector
+class StatesUpdater:
+    def __init__(self, size, initial=0.00):
+        self.initial = initial
+        self.size = size
+        self.buffer = np.array([initial for _ in range(size)])
+        
+    def update(self, value):
+        for i in range(self.size-1, 0, -1):
+            self.buffer[i] = self.buffer[i-1]
+        self.buffer[0] = value
+        return self.buffer
+    
+    def get(self, var='x'):
+        data = {var: self.buffer[0]}
+        for i in range(1, self.size):
+            data[f'{var}(n-{i})'] = self.buffer[i]
+        return {key: float(val) for key, val in data.items()}
+# CONFIGURAÇÕES
+OPTIONS = json.loads(open('info.json', 'r').read())
+dt      = OPTIONS.get('dt')
+
+x_min, x_max = OPTIONS.get('sensor_range')
+u_min, u_max = OPTIONS.get('actuator_range')
+OFFSET = OPTIONS.get('offset')
+ts     = OPTIONS.get('ts')
+u_std  = OPTIONS.get('actuator_std')
+- Loading System Simulator
+system_info  = json.loads(open('Saved/System/info.json', 'r').read())
+system_vars  = system_info['variables']
+n_states_sys = sum(['x(n-' in var for var in system_vars]) + 1
+n_states_ctl = sum(['u(n-' in var for var in system_vars]) + 1
+
+print(system_info)
+print(system_vars)
+print(n_states_sys, 'system past states')
+print(n_states_ctl, 'actuator past states')
+
+system = joblib.load('Saved/System/model.pkl')
+system
+control_info = json.load(open('Saved/Controller/info.json', 'r'))
+
+selector = NeuralSelector(control_info['architecture'])
+Actor, Evaluator, params = selector.get()
+
+actor_kwargs = control_info['actor_kwargs']
+max_action = control_info.get('max_action', 50.0)
+
+state_dim = (1 + n_states_sys + n_states_ctl) # Calcula o tamanho exato da camada de entrada automaticamente!
+
+actor = Actor(state_dim=state_dim, action_dim=1, max_action=max_action, **actor_kwargs)
+actor.load_state_dict(torch.load('Saved/Controller/actor.pth'))
+actor.eval() # Muito importante manter o eval() ligado para inferência!
+# SIMULADOR
+- Simulador Matemático do Sistema (Plant). Reage aos comandos do atuador 
+    e devolve a nova leitura do sensor, embasado no modelo empírico de regressão.
+class System:
+    def __init__(self, model, columns, n_states_sys, n_states_ctl, init_x=0.0, init_u=0.0):
+        self.n_states_sys = n_states_sys
+        self.n_states_ctl = n_states_ctl
+        
+        self.sensor   = StatesUpdater(self.n_states_sys, initial=init_x)
+        self.actuator = StatesUpdater(self.n_states_ctl, initial=init_u)
+        
+        self.model = model
+        self.cols  = columns
+
+    def update(self, actuator_val):
+        self.actuator.update(actuator_val)
+        data = self.actuator.get('u')
+        
+        for i in range(1, self.n_states_sys):
+            data[f'x(n-{i})'] = self.sensor.buffer[i-1]
+            
+        response = self.model.predict(pd.DataFrame([data], columns=self.cols))[0]
+        self.sensor.update(response)
+        return self.sensor.buffer[0]
+# INFERENCE CONTROLLER
+Este controlador carrega a arquitetura e os pesos ideais exportados na fase de treinamento. Ele faz o trabalho duro de injetar o Setpoint e o Sensor de leitura e computar o desvio exigido no Motor (Atuador).
+class Controller:
+    def __init__(self, actor_model, n_states_sys, n_states_ctl, init_x=0.0, init_u=0.0):
+        self.n_states_sys = n_states_sys
+        self.n_states_ctl = n_states_ctl
+        
+        self.sensor   = StatesUpdater(self.n_states_sys, initial=init_x)
+        self.actuator = StatesUpdater(self.n_states_ctl, initial=init_u)
+        self.actor_model = actor_model
+        
+    def update(self, setpoint, sensor_val):
+        self.sensor.update(sensor_val)
+        
+        sensor_center    = (x_max + x_min) / 2.0
+        sensor_amplitude = (x_max - x_min) / 2.0
+        
+        actuator_center    = (u_max + u_min) / 2.0
+        actuator_amplitude = (u_max - u_min) / 2.0
+        
+        error = setpoint - self.sensor.buffer[0]
+        normalized_error = error / sensor_amplitude
+        state = [normalized_error]
+        
+        for i in range(self.n_states_sys):
+            normalized_x = (self.sensor.buffer[i] - sensor_center) / sensor_amplitude
+            state.append(normalized_x)
+            
+        for i in range(self.n_states_ctl):
+            normalized_u = (self.actuator.buffer[i] - actuator_center) / actuator_amplitude
+            state.append(normalized_u)
+            
+        state_tensor = torch.FloatTensor(np.array(state, dtype=np.float32).reshape(1, -1))
+        
+        with torch.no_grad():
+            delta_u = self.actor_model(state_tensor).cpu().data.numpy().flatten()[0]
+            
+        # Calcula a nova ação e já clipa nos limites físicos (ex: 45 a 135)
+        response = self.actuator.buffer[0] + delta_u
+        response = np.clip(response, u_min, u_max)
+        
+        self.actuator.update(response)
+        return response
+
+## FEEDBACK (MALHA FECHADA)
+Injetamos uma série sintética de variações dinâmicas de setpoint para testar a capacidade da rede de manter a trajetória suavemente.
+STEP = int(10*ts/dt)
+setpoints = [0.12] * STEP + [0.15] * STEP + [0.10] * STEP + [0.05] * STEP + [0.15] * STEP
+init_x = (x_max + x_min) / 2.0
+init_u = (u_max + u_min) / 2.0
+
+system     = System(system, system_vars, n_states_sys, n_states_ctl, init_x=init_x, init_u=init_u)
+controller = Controller(actor, n_states_sys, n_states_ctl, init_x=init_x, init_u=init_u)
+
+results = []
+sensor_val = init_x
+time = 0
+
+for sp in tqdm(setpoints):
+    actuator_val = controller.update(sp, sensor_val)
+    sensor_val   = system.update(actuator_val)
+    
+    time = (time + dt)
+    results.append({'t': time, 'setpoint': sp, 'x': sensor_val, 'u': actuator_val, 'error': sp - sensor_val})
+
+df = pd.DataFrame(results)
+df
+plt.figure(figsize=(20, 6))
+plt.subplot(1, 2, 1)
+plt.plot(df.t, df.u, label='output')
+plt.ylabel('output'); plt.xlabel('time'); plt.grid(alpha=0.3)
+
+plt.subplot(1, 2, 2)
+plt.plot(df.t, df.setpoint, 'r--', label='setpoint')
+plt.plot(df.t, df.x, 'b-', label='sensor')
+plt.xlabel('time'); plt.ylabel('sensor'); plt.legend(); plt.grid(alpha=0.3)
+plt.show()
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DynamicMlpActor(nn.Module):
+    def __init__(self, state_dim, action_dim, max_action, hiddenSizes=[400, 300]):
+        super(DynamicMlpActor, self).__init__()
+        self.layers = nn.ModuleList()
+        
+        lastDim = state_dim
+        for size in hiddenSizes:
+            self.layers.append(nn.Linear(lastDim, size))
+            lastDim = size
+            
+        self.outLayer = nn.Linear(lastDim, action_dim)
+        self.max_action = max_action
+        
+    def forward(self, state):
+        a = state
+        for layer in self.layers:
+            a = F.relu(layer(a))
+        return self.max_action * torch.tanh(self.outLayer(a))
+
+class DynamicMlpCritic(nn.Module):
+    def __init__(self, state_dim, action_dim, hiddenSizes=[400, 300]):
+        super(DynamicMlpCritic, self).__init__()
+        self.layers = nn.ModuleList()
+        
+        lastDim = state_dim + action_dim
+        for size in hiddenSizes:
+            self.layers.append(nn.Linear(lastDim, size))
+            lastDim = size
+            
+        self.outLayer = nn.Linear(lastDim, 1)
+        
+    def forward(self, state, action):
+        q = torch.cat([state, action], 1)
+        for layer in self.layers:
+            q = F.relu(layer(q))
+        return self.outLayer(q)
+
+class DynamicLstmActor(nn.Module):
+    def __init__(self, state_dim, action_dim, max_action, hiddenSize=256, numLayers=1):
+        super(DynamicLstmActor, self).__init__()
+        self.lstm = nn.LSTM(state_dim, hiddenSize, numLayers, batch_first=True)
+        self.outLayer = nn.Linear(hiddenSize, action_dim)
+        self.max_action = max_action
+        
+    def forward(self, state):
+        # State shape expected to be (batch, seq, state_dim). 
+        # If (batch, state_dim) is passed, we unsqueeze it.
+        if len(state.shape) == 2:
+            state = state.unsqueeze(1)
+            
+        lstmOut, _ = self.lstm(state)
+        # Take the output of the last sequence step
+        a = lstmOut[:, -1, :] 
+        return self.max_action * torch.tanh(self.outLayer(a))
+
+class DynamicLstmCritic(nn.Module):
+    def __init__(self, state_dim, action_dim, hiddenSize=256, numLayers=1):
+        super(DynamicLstmCritic, self).__init__()
+        self.lstm = nn.LSTM(state_dim + action_dim, hiddenSize, numLayers, batch_first=True)
+        self.outLayer = nn.Linear(hiddenSize, 1)
+        
+    def forward(self, state, action):
+        if len(state.shape) == 2:
+            state = state.unsqueeze(1)
+        if len(action.shape) == 2:
+            action = action.unsqueeze(1)
+            
+        q = torch.cat([state, action], 2)
+        lstmOut, _ = self.lstm(q)
+        q = lstmOut[:, -1, :]
+        return self.outLayer(q)
+
+class NeuralSelector:
+    """
+    Selector for different Neural Network architectures for DRL.
+    """
+    options = {
+        'mlp_standard': {
+            'actorClass':  DynamicMlpActor,
+            'criticClass': DynamicMlpCritic,
+            'params': {
+                'hiddenSizes': [[400, 300], [256, 256], [128, 128]],
+                'actorLr': [1e-4, 5e-5],
+                'criticLr': [1e-3, 5e-4],
+                'batchSize': [64, 128]
+            }
+        },
+        'mlp_deep': {
+            'actorClass': DynamicMlpActor,
+            'criticClass': DynamicMlpCritic,
+            'params': {
+                'hiddenSizes': [[400, 300, 200], [256, 256, 128], [512, 256, 128]],
+                'actorLr': [1e-4, 1e-5],
+                'criticLr': [1e-3, 1e-4],
+                'batchSize': [64, 128, 256]
+            }
+        },
+        'mlp_wide': {
+            'actorClass': DynamicMlpActor,
+            'criticClass': DynamicMlpCritic,
+            'params': {
+                'hiddenSizes': [[1024, 512], [512, 512]],
+                'actorLr': [5e-5, 1e-5],
+                'criticLr': [5e-4, 1e-4],
+                'batchSize': [128, 256]
+            }
+        },
+        'lstm': {
+            'actorClass': DynamicLstmActor,
+            'criticClass': DynamicLstmCritic,
+            'params': {
+                'hiddenSize': [128, 256, 512],
+                'numLayers': [1, 2],
+                'actorLr': [1e-4, 5e-5],
+                'criticLr': [1e-3, 5e-4],
+                'batchSize': [64, 128]
+            }
+        }
+    }
+
+    def __init__(self, name: str):
+        self.chosen = name
+        if name not in self.options:
+            raise ValueError(f"Model '{name}' not found. Available options: {list(self.options.keys())}")
+        self.selected = self.options[name]
+
+    def get(self):
+        """
+        Returns the actor class, critic class, and a dictionary of hyperparameters 
+        that can be iterated over (similar to a GridSearch parameter grid).
+        """
+        actorClass  = self.selected['actorClass']
+        criticClass = self.selected['criticClass']
+        params = self.selected['params']
+        return actorClass, criticClass, params

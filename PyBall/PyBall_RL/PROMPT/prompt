@@ -1,0 +1,31 @@
+# Role & Context
+You are an expert Control Systems Engineer specializing in Deep Reinforcement Learning (DRL) applied to physical systems. 
+I am building a continuous control project using DDPG to stabilize a "ball and beam" system actuated by a servo motor. The data acquisition is done via Arduino. I have performed system identification using Linear Regression to build a simulator for the RL agent to train on. 
+I am attaching the code and data metrics (`code.txt`, `info.json`, and several plots showing the acquisition, delay, and training results).
+# The Problem
+The RL controller is failing. It oscillates significantly, and even when it seems to stabilize, a steady-state error persists. 
+I want to avoid arbitrarily guessing hyperparameters. I need the adjustments to be rigorously grounded in control theory criteria (e.g., settling time $t_s$, transport delay/offset, max control action limits).
+# Key System Observations (From attached data)
+* **Sample Time ($dt$):** ~0.048s
+* **Transport Delay (Offset):** 22 steps (~1.05 seconds of dead-time).
+* **State Space:** Currently massive (55 dimensions) due to feeding 27 past states of both the actuator and the sensor to handle the delay.
+* **Reward Function:** Currently using a weighted sum of quadratic error and control effort.
+* **System ID:** Linear regression achieved an $R^2$ of 0.996, but the RL agent trained on this simulator fails to control the actual dynamics smoothly.
+# Core Objective
+1.  **Diagnose:** Analyze the provided architecture, reward function, and state representation. Identify the root mathematical or architectural causes of the oscillation and the steady-state error. (Pay special attention to how the 22-step dead-time and the 55-dimensional state space are affecting the DDPG agent).
+2.  **Solve:** Propose concrete solutions grounded in control theory. This might include:
+    * Reward shaping (e.g., adding integral action representation to fix steady-state error).
+    * State-space reformulation (e.g., using a delay-aware architecture or reducing dimensionality).
+    * Tuning guidelines based strictly on the provided physical metrics ($t_s$, $dt$, max_action).
+# Strict Requirements & Constraints
+* **No Guesswork:** If a parameter needs tuning, provide the formula or theoretical justification based on the system's metrics. If you do not know the exact fix, state your uncertainty clearly rather than hallucinating code.
+* **Code Style:** Any refactored code must be clean, highly functional, modular, and class-based. 
+* **Comments:** Keep inline comments to an absolute minimum. Let the code structure speak for itself.
+* **Focus:** Do not rewrite the data acquisition or system ID code unless it is the direct cause of the RL failure. Focus your code output on the RL Agent, Reward Function, and State Representation logic.
+# Attached Files Context
+* **code.txt:** Contains the Arduino acquisition logic, Python system identification (Linear Regression), the custom `FeedbackSimulator` (environment), and the DDPG agent classes.
+* **info.json:** Contains the extracted metrics, delay offset, ranges, and current network hyperparameters.
+* **Images:** Visual proof of the $dt$ distribution, cross-correlation for delay extraction, system ID performance, and the failing oscillatory control response.
+Please analyze the architecture and tell me exactly why it is oscillating and how to fix it theoretically and programmatically.
+
+READ ALL THE FILES THAT I SEND YOU, THE CODE AND OUTPUTS AND INFO ARE THERE
