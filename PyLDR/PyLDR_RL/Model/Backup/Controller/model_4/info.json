@@ -1,0 +1,25 @@
+{
+    "model":"rl_agent",
+    "params":{
+        "RL_Agent":"PPO"
+    },
+    "K_CV":5,
+    "info":{
+        "r2":0,
+        "r2_adj":0,
+        "rmse":0,
+        "mae":0
+    },
+    "variables":[
+        "u(n-1)",
+        "u(n-2)",
+        "u(n-3)",
+        "u(n-4)",
+        "x",
+        "x(n-1)",
+        "x(n-2)",
+        "x(n-3)",
+        "x(n-4)",
+        "error"
+    ]
+}
